@@ -10,7 +10,7 @@ import sys
 import os
 # print("Current working directory:", os.getcwd())
 # print("Script directory:", os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.getcwd())
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.modelUtils import *
 from utils.utils import *
@@ -43,12 +43,12 @@ import pickle
 import dotenv
 import matplotlib.pyplot as plt
 import numpy as np
-import openai
+#import openai
 import pandas as pd
 import tabulate
 
 import dotenv, os
-import openai
+#import openai
 from lllm.questions_loaders import Sciq
 
 from lllm.questions_loaders import Questions1000, WikiData, Commonsense2, TatoebaEngToFre, \
@@ -64,7 +64,7 @@ template_name = 'llama-2'
 conv_template = load_conversation_template(template_name)
 
 dotenv.load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+#openai.api_key = os.getenv("OPENAI_API_KEY")
 
 cot_lie = """
 Example 1
