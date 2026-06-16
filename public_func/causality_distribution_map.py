@@ -47,7 +47,7 @@ from lllm.questions_loaders import Questions1000, WikiData, Commonsense2, Tatoeb
 TatoebaFreToEng, Sciq, MathematicalProblems, AnthropicAwarenessAI, AnthropicAwarenessArchitecture, \
 AnthropicAwarenessNNArchitecture, BBQ, SocialChem, InnodateBias, AutoDAN, GCG, PAP
 
-from bias_detection.TrustGPT.utils.metric.Toxicity import get_toxicity_value
+#from bias_detection.TrustGPT.utils.metric.Toxicity import get_toxicity_value
 
 import multiprocessing as mp
 
@@ -1547,6 +1547,8 @@ def analyse_causality_toxic(dataset, mt, model_name, saving_dir, suffix=None, sa
             return match.group(1)
         else:
             return output
+
+    from bias_detection.TrustGPT.utils.metric.Toxicity import get_toxicity_value
 
     actions = dataset["action"]
     data_ids = dataset["data_id"]
