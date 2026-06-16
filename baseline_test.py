@@ -26,12 +26,12 @@ import pickle
 import dotenv
 import matplotlib.pyplot as plt
 import numpy as np
-import openai
+#import openai
 import pandas as pd
 import tabulate
 
 import dotenv, os
-import openai
+#import openai
 from lllm.questions_loaders import Sciq
 from lllm.classification_utils import Classifier, create_datasets_paired_questions as create_datasets
 
@@ -41,7 +41,7 @@ from lllm.questions_loaders import SyntheticFacts, Questions1000, WikiData, Comm
 from lllm.questions_loaders import BBQ
 
 dotenv.load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+#openai.api_key = os.getenv("OPENAI_API_KEY")
 
 cot_lie = """
 Example 1

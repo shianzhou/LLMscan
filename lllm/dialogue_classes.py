@@ -1,6 +1,6 @@
 import logging
 
-import openai
+#import openai
 from retry import retry
 
 import torch
@@ -234,6 +234,7 @@ class LanguageModelAgent:
         model_kwargs_wo_logprobs = self.model_kwargs.copy()
         model_kwargs_wo_logprobs.pop('logprobs', None)
 
+        import openai
         response = openai.Completion.create(
             model=self.model, prompt=prompts, echo=False, logprobs=logprobs, **model_kwargs_wo_logprobs
         )
@@ -583,7 +584,7 @@ if __name__ == "__main__":
     #        Add more classes for different types of suspects and investigators
     #        Expected cost calaculation?
 
-    openai.api_key = "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"
+    #openai.api_key = "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"
 
     questions = ["Where is the Eiffel Tower?"]
     sus_prompts = [

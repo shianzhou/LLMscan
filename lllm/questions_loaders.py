@@ -9,7 +9,7 @@ import sys
 sys.setrecursionlimit(10000)
 
 import numpy as np
-import openai
+#import openai
 import pandas as pd
 from pandas import DataFrame
 from scipy.special import logsumexp
@@ -3883,7 +3883,7 @@ if __name__ == "__main__":
     import dotenv
 
     dotenv.load_dotenv()
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+    #openai.api_key = os.getenv("OPENAI_API_KEY")
 
     # test the 1000 questions dataset
     q = Questions1000()

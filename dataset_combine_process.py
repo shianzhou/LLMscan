@@ -31,12 +31,12 @@ import pickle
 import dotenv
 import matplotlib.pyplot as plt
 import numpy as np
-import openai
+#import openai
 import pandas as pd
 import tabulate
 
 import dotenv, os
-import openai
+#import openai
 from lllm.questions_loaders import Sciq
 
 from lllm.questions_loaders import Questions1000, WikiData, Commonsense2, TatoebaEngToFre, \

@@ -4,11 +4,11 @@ import json
 import os
 
 import dotenv
-import openai
+#import openai
 import pandas as pd
 
 dotenv.load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+#openai.api_key = os.getenv("OPENAI_API_KEY")
 
 model = "text-davinci-003"
 temperature = 0
@@ -76,6 +76,7 @@ for j in range(start_from_fact, max_facts_to_convert, max_batch_size):
         k] + "\nQuestion:" for k in
                range(j, j + batch_size)]
 
+    import openai
     response = openai.Completion.create(model=model, prompt=prompts, temperature=temperature, presence_penalty=0,
                                         frequency_penalty=0, max_tokens=64, top_p=1, logprobs=0, stop="\n")
     questions += [response["choices"][i]["text"] for i in range(batch_size)]
