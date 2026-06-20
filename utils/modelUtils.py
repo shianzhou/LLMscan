@@ -23,7 +23,7 @@ class ModelAndTokenizer:
     ):
         if tokenizer is None:
             assert model_name is not None
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
         if load_8_bit:
             model = AutoModelForCausalLM.from_pretrained(model_name,load_in_8bit=True)
             nethook.set_requires_grad(False, model)
@@ -33,11 +33,13 @@ class ModelAndTokenizer:
         else:
             if device != 'balanced':
                 model = AutoModelForCausalLM.from_pretrained(
-                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
+                    local_files_only=True
                 )
             else:
                 model = AutoModelForCausalLM.from_pretrained(
-                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype, device_map=device
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype, device_map=device,
+                    local_files_only=True
                 )
             nethook.set_requires_grad(False, model)
             if device != 'balanced':

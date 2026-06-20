@@ -2,7 +2,7 @@
 "model_path": "Qwen/",
 "model_name": "Qwen2.5-1.5B-Instruct",
       "task": "lie",
-      "if_causality_analysis": true,
+      "if_causality_analysis": false,
       "if_detect": true,
       "dataset": "Questions1000()",
       "target": "layer",

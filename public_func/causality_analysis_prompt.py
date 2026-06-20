@@ -1652,14 +1652,14 @@ def train_detector(dataset, model_name, task, save_dir=None, target='layer', lie
         if f"{model_name}_layer_1_neuron_aie" in dataset:
             all_causality_effects, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
         else:
-            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
     elif target == 'layer':
         if f"{model_name}_layer_aie_orig" in dataset or f"{model_name}_layer_aie" in dataset:
             # all_causality_effects, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
             all_causality_effects, all_labels = get_X_Y_from_dataset_with_condition(dataset, model_name, task, target)
         else:
-            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
 
     # for neuron/layer get aie from dataset
@@ -1700,14 +1700,14 @@ def evaluate_detector_all(dataset, model_name, task, logistic_model_aie, linear_
         if f"{model_name}_layer_1_neuron_aie" in dataset:
             all_aies, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
         else:
-            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
     elif target == 'layer':
         if f"{model_name}_layer_aie_orig" in dataset or f"{model_name}_layer_aie" in dataset:
             # all_causality_effects, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
             all_aies, all_labels = get_X_Y_from_dataset_with_condition(dataset, model_name, task, target)
         else:
-            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
 
     # for layer

@@ -1749,6 +1749,7 @@ def evaluate_detector(all_aie, all_labels, model):
     return accuracy, roc
 
 def train_detector(dataset, model_name, task, save_dir=None, target='layer', lie_instruction_num='random'):
+    dataset_name_to_object = {}
     '''
     sample_split_prop = 0.7  # the proportion of training and testing data = 0.7/0.3
     save_dir = "outputs/llama-2-7b/lie-detector/"
@@ -1757,14 +1758,16 @@ def train_detector(dataset, model_name, task, save_dir=None, target='layer', lie
         if f"{model_name}_layer_1_neuron_aie" in dataset:
             all_causality_effects, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
         else:
-            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            print("WARNING: AIE data not found in dataset, computing from scratch...")
+            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
     elif target == 'layer':
         if f"{model_name}_layer_aie_orig" in dataset or f"{model_name}_layer_aie" in dataset:
             # all_causality_effects, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
             all_causality_effects, all_labels = get_X_Y_from_dataset_with_condition(dataset, model_name, task, target)
         else:
-            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            print("WARNING: AIE data not found in dataset, computing from scratch...")
+            all_causality_effects, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
 
     # for neuron/layer get aie from dataset
@@ -1805,14 +1808,14 @@ def evaluate_detector_all(dataset, model_name, task, logistic_model_aie, linear_
         if f"{model_name}_layer_1_neuron_aie" in dataset:
             all_aies, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
         else:
-            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
     elif target == 'layer':
         if f"{model_name}_layer_aie_orig" in dataset or f"{model_name}_layer_aie" in dataset:
             # all_causality_effects, all_labels = get_X_Y_from_dataset(dataset, model_name, target=target)
             all_aies, all_labels = get_X_Y_from_dataset_with_condition(dataset, model_name, task, target)
         else:
-            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, lie_instruction_num, if_balance=True, dataset_name_to_object=dataset_name_to_object)
+            all_aies, all_kurt, all_labels = get_aie_kurt(dataset, model_name, target=target)
 
 
     # for layer
@@ -1939,8 +1942,8 @@ if __name__ == '__main__':
     #         Sciq(), MathematicalProblems(), AnthropicAwarenessAI(), AnthropicAwarenessArchitecture(),
     #         AnthropicAwarenessNNArchitecture()]
 
-    dataset = MathematicalProblems()
-    print("-->columns", list(dataset.columns))
+    #dataset = MathematicalProblems()
+    #print("-->columns", list(dataset.columns))
 
     # sys.exit()
 
