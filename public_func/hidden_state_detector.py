@@ -625,6 +625,8 @@ if __name__ == '__main__':
     parser.add_argument('--test_dataset', type=str, help='跨数据集测试集（如 GCG()）')
     parser.add_argument('--force_extract', action='store_true', help='忽略缓存，强制重新提取 hidden states')
     parser.add_argument('--run_all', action='store_true', help='跑全部三个数据集 + 交叉验证组合')
+    parser.add_argument('--local_files_only', action='store_true', help='仅使用本地缓存模型（离线模式）')
+    parser.add_argument('--device', type=str, default='cuda:0', help='GPU 设备（默认 cuda:0）')
     args = parser.parse_args()
 
     # 命令行覆盖
@@ -652,6 +654,10 @@ if __name__ == '__main__':
     model_path = parameters['model_path']
     model_name = parameters['model_name']
     saving_dir = parameters.get('saving_dir', 'outputs_hiddenstate/')
+    # 自动按模型名分子目录，不同模型输出不会互相覆盖
+    safe_model = model_name.replace("/", "_")
+    if not saving_dir.rstrip("/").endswith(safe_model):
+        saving_dir = os.path.join(saving_dir, safe_model)
     n_last_layers = parameters.get('n_last_layers', 5)
     max_samples = parameters.get('max_samples', None)
     test_size = parameters.get('test_size', 0.3)
@@ -663,7 +669,8 @@ if __name__ == '__main__':
     mt = ModelAndTokenizer(
         model_path + model_name,
         low_cpu_mem_usage=True,
-        device='cuda:0'
+        device=getattr(args, 'device', 'cuda:0'),
+        local_files_only=getattr(args, 'local_files_only', False),
     )
     mt.model
     print("--> 模型加载成功")

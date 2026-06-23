@@ -19,27 +19,28 @@ class ModelAndTokenizer:
         torch_dtype=None,
         load_8_bit = False,
         load_4_bit = False,
-        device='cuda:0'
+        device='cuda:0',
+        local_files_only=False,
     ):
         if tokenizer is None:
             assert model_name is not None
-            tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+            tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=local_files_only)
         if load_8_bit:
-            model = AutoModelForCausalLM.from_pretrained(model_name,load_in_8bit=True)
+            model = AutoModelForCausalLM.from_pretrained(model_name,load_in_8bit=True, local_files_only=local_files_only)
             nethook.set_requires_grad(False, model)
         elif load_4_bit:
-            model = AutoModelForCausalLM.from_pretrained(model_name,load_in_4bit=True)
+            model = AutoModelForCausalLM.from_pretrained(model_name,load_in_4bit=True, local_files_only=local_files_only)
             nethook.set_requires_grad(False, model)
         else:
             if device != 'balanced':
                 model = AutoModelForCausalLM.from_pretrained(
                     model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
-                    local_files_only=True
+                    local_files_only=local_files_only
                 )
             else:
                 model = AutoModelForCausalLM.from_pretrained(
                     model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype, device_map=device,
-                    local_files_only=True
+                    local_files_only=local_files_only
                 )
             nethook.set_requires_grad(False, model)
             if device != 'balanced':

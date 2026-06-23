@@ -81,3 +81,133 @@ Finally, to run experiments on the OpenAI models, you'll need to store your [Ope
 ```OPENAI_API_KEY=sk-<your key>```
 
 Running experiments with the OpenAI API will incur a monetary cost. Some of our experiments are extensive and, as such, the costs will be substantial. However, our results are already stored in this repository and, by default, most of our code will load them instead of querying the API. Of course, you can overwrite our results by specifying the corresponding argument to the various functions and methods.
+
+## Hidden-State Detector（新版主方法）
+
+不依赖因果干预的轻量级 LLM 不当行为检测。一次前向传播 → 提取 hidden states → 训练 LR/MLP 分类器 → PCA/t-SNE 可视化。
+
+---
+
+### 第一步：配置服务器环境
+
+```bash
+# 1. 创建 conda 环境
+conda create -n llmscan python=3.10 -y
+conda activate llmscan
+
+# 2. 安装 PyTorch（根据 CUDA 版本选择，见 https://pytorch.org）
+# CUDA 12.1 示例：
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# 3. 安装其余依赖
+pip install -r requirements.txt
+
+# 4. 验证 GPU 可用
+python -c "import torch; print(torch.cuda.is_available())"
+# 应输出 True
+```
+
+---
+
+### 第二步：跑实验
+
+**只需改 `--model_name`，其余自动完成。** 每个模型的数据集相同（AutoDAN / GCG / PAP），不需要修改。
+
+```bash
+# ===== 方式一：命令行指定模型（推荐，不需要改任何文件） =====
+
+# Llama-2-7B
+python public_func/hidden_state_detector.py \
+    --model_name "meta-llama/Llama-2-7b-chat-hf" \
+    --run_all
+
+# Llama-2-13B
+python public_func/hidden_state_detector.py \
+    --model_name "meta-llama/Llama-2-13b-chat-hf" \
+    --run_all
+
+# Llama-3.1-8B
+python public_func/hidden_state_detector.py \
+    --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" \
+    --run_all
+
+# Mistral-7B
+python public_func/hidden_state_detector.py \
+    --model_name "mistralai/Mistral-7B-Instruct-v0.2" \
+    --run_all
+
+# Qwen2.5-1.5B（小模型，快速验证）
+python public_func/hidden_state_detector.py \
+    --model_name "Qwen/Qwen2.5-1.5B-Instruct" \
+    --run_all
+
+
+# ===== 方式二：修改 parameters.json 后直接跑（不改命令行） =====
+# 编辑 public_func/parameters.json，把 model_name 改成目标模型，然后：
+python public_func/hidden_state_detector.py --run_all
+```
+
+`--run_all` 自动完成：
+- 三个数据集各自 7:3 测试（3 次）
+- 全部 6 对交叉验证
+- 所有 PCA + t-SNE 可视化
+- hidden-state 特征缓存（二次运行秒进）
+
+---
+
+### 第三步：查看结果
+
+**每个模型自动输出到独立目录，不会互相覆盖。**
+
+```
+outputs_hiddenstate/
+├── meta-llama_Llama-2-7b-chat-hf/      # 模型1
+│   ├── cache/
+│   │   ├── AutoDAN_..._samples614.npz   # hidden-state 特征缓存
+│   │   ├── GCG_..._samples1070.npz
+│   │   └── PAP_..._samples500.npz
+│   ├── figs/
+│   │   ├── hidden_state_AutoDAN_...pdf  # 同数据集 PCA/t-SNE
+│   │   ├── cross_AutoDAN_to_GCG_...pdf  # 跨数据集 PCA/t-SNE
+│   │   └── ...（共 12 张图）
+│   ├── logistic_hidden_state_AutoDAN.joblib
+│   └── mlp_hidden_state_AutoDAN.joblib
+│
+├── meta-llama_Llama-2-13b-chat-hf/     # 模型2
+│   └── ...
+│
+├── meta-llama_Meta-Llama-3.1-8B-Instruct/  # 模型3
+│   └── ...
+│
+└── mistralai_Mistral-7B-Instruct-v0.2/     # 模型4
+    └── ...
+```
+
+`saving_dir` 自动拼接规则：`outputs_hiddenstate/{model_name 的 / 替换为 _}/`
+
+所以换模型 = 换输出目录，不会互相污染。跑完一个新模型，对应目录下就是它的全部结果。
+
+---
+
+### 常用参数速查
+
+| 想做什么 | 命令 |
+|----------|------|
+| 换模型 | `--model_name "meta-llama/Llama-2-13b-chat-hf"` |
+| 跑全部实验 | `--run_all` |
+| 只跑一个数据集 | `--dataset "AutoDAN()"`（去掉 `--run_all`） |
+| 跨数据集测试 | `--dataset "AutoDAN()" --test_dataset "GCG()"` |
+| 限制样本数 | `--max_samples 100`（各取 50 adv + 50 non_adv） |
+| 换特征层数 | `--n_last_layers 3` |
+| 离线模式 | `--local_files_only` |
+| 强制重新提取 | `--force_extract` |
+| 指定 GPU | `--device "cuda:1"` |
+| 换输出目录 | `--saving_dir "my_experiments/"` |
+
+### 数据集
+
+| 数据集 | `--dataset` | adv | non_adv |
+|--------|-------------|-----|---------|
+| AutoDAN | `"AutoDAN()"` | 372 | 242 |
+| GCG | `"GCG()"` | 550 | 520 |
+| PAP | `"PAP()"` | 258 | 242 |

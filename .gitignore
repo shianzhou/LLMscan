@@ -28,4 +28,14 @@ outputs*
 *.ipynb
 requirements_caspter.txt
 
+# hidden-state detector artifacts
+cache/
+*.joblib
+figs/
 
+# model files (large)
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
