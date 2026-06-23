@@ -2,9 +2,8 @@
       "model_path": "Qwen/",
       "model_name": "Qwen2.5-1.5B-Instruct",
       "dataset": "AutoDAN()",
-      "max_samples": 100,
+      "test_dataset": "GCG()",
       "n_last_layers": 5,
-      "test_size": 0.3,
       "random_state": 42,
       "if_visualize": true,
       "saving_dir": "outputs_hiddenstate/qwen2.5-1.5b/"
