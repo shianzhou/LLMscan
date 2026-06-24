@@ -460,7 +460,32 @@ def _train_on_full_test_on_heldout(train_features, train_labels,
 
 
 # ============================================================
-# 8. 主流程
+# 8. 结果日志
+# ============================================================
+
+def _log_results(saving_dir, model_name, train_name, test_name, results):
+    """将单次实验结果追加写入 results.txt。"""
+    log_path = os.path.join(saving_dir, "results.txt")
+    os.makedirs(saving_dir, exist_ok=True)
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 首次写入时加表头
+    write_header = not os.path.exists(log_path)
+    with open(log_path, 'a', encoding='utf-8') as f:
+        if write_header:
+            f.write(f"{'time':<20} {'model':<40} {'train_set':<12} {'test_set':<12} "
+                    f"{'classifier':<10} {'ACC':>8} {'F1':>8} {'ROC':>8} {'FPR':>8}\n")
+            f.write("-" * 130 + "\n")
+        for name in ['logistic', 'mlp']:
+            r = results[name]
+            f.write(f"{timestamp:<20} {model_name:<40} {train_name:<12} {test_name:<12} "
+                    f"{name:<10} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}\n")
+    print(f"--> 结果已追加: {log_path}")
+
+
+# ============================================================
+# 9. 主流程
 # ============================================================
 
 def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
@@ -530,6 +555,7 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
             r = results[name]
             print(f"  {name:<15} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}")
 
+        _log_results(saving_dir, model_name, dataset_name, test_name, results)
         return results
 
     # --- 同数据集模式（原有逻辑） ---
@@ -594,11 +620,12 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
         r = results[name]
         print(f"  {name:<15} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}")
 
+    _log_results(saving_dir, model_name, dataset_name, dataset_name, results)
     return results
 
 
 # ============================================================
-# 9. 命令行入口
+# 10. 命令行入口
 # ============================================================
 
 def load_parameters(file_path):

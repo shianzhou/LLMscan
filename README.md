@@ -92,7 +92,7 @@ Running experiments with the OpenAI API will incur a monetary cost. Some of our 
 
 ```bash
 # 1. 创建 conda 环境
-conda create -n llmscan python=3.10 -y
+conda create -n llmscan python=3.8.20 -y
 conda activate llmscan
 
 # 2. 安装 PyTorch（根据 CUDA 版本选择，见 https://pytorch.org）
