@@ -41,6 +41,8 @@ random.seed(0)
 np.random.seed(0)
 torch.manual_seed(0)
 
+POOLING_VERSION = "lasttoken_v2"
+
 
 # ============================================================
 # 1. 数据集采样
@@ -136,7 +138,7 @@ def load_feature_cache(saving_dir, dataset_name, model_name,
 
 
 def _get_or_extract_features(prompts, labels, mt, dataset_name, model_name,
-                              saving_dir, n_last_layers, pooling="lasttoken",
+                              saving_dir, n_last_layers, pooling=POOLING_VERSION,
                               force_extract=False):
     """
     先查缓存，未命中再提取 hidden states，提取后自动保存。
@@ -184,7 +186,7 @@ def extract_hidden_states_batched(prompts, mt, n_last_layers=5, batch_size=16, d
     for i in tqdm(range(0, len(prompts), batch_size), desc="    提取 hidden states"):
         batch_prompts = prompts[i:i + batch_size]
         inputs = make_inputs(mt.tokenizer, batch_prompts, device=device)
-        # make_inputs 做左 padding，每个序列最后位置一定是真实 token
+        # make_inputs 当前使用左 padding；真实 token 的末尾位置需从 mask 右侧查找。
 
         torch.cuda.empty_cache()
         with torch.no_grad():
@@ -194,9 +196,10 @@ def extract_hidden_states_batched(prompts, mt, n_last_layers=5, batch_size=16, d
         all_hidden = outputs.hidden_states
         last_n = list(all_hidden[-n_last_layers:])  # N 个 [B, S, hidden_dim]
 
-        # 每层取最后一个非 padding token
-        B = inputs['attention_mask'].shape[0]
-        last_positions = inputs['attention_mask'].sum(dim=1) - 1  # [B]
+        # 每层取最后一个非 padding token。该写法同时兼容左/右 padding。
+        mask = inputs['attention_mask']
+        B = mask.shape[0]
+        last_positions = mask.shape[1] - 1 - torch.flip(mask, dims=[1]).argmax(dim=1)  # [B]
 
         layer_features = []
         for hs in last_n:
@@ -349,9 +352,9 @@ def visualize_pca_tsne(features, labels, dataset_name, model_name, saving_dir,
     fig_dir = os.path.join(saving_dir, "figs")
     os.makedirs(fig_dir, exist_ok=True)
     if remove_top_outlier:
-        fig_name = f"hidden_state_{dataset_name}_{model_name}_remove_top1_outlier.pdf"
+        fig_name = f"hidden_state_{dataset_name}_{model_name}_{POOLING_VERSION}_remove_top1_outlier.pdf"
     else:
-        fig_name = f"hidden_state_{dataset_name}_{model_name}.pdf"
+        fig_name = f"hidden_state_{dataset_name}_{model_name}_{POOLING_VERSION}.pdf"
     fig_path = os.path.join(fig_dir, fig_name)
     plt.savefig(fig_path, bbox_inches="tight")
     print(f"--> 可视化已保存: {fig_path}")
@@ -413,7 +416,7 @@ def _visualize_cross_dataset(train_features, train_labels, train_name,
     plt.tight_layout()
     fig_dir = os.path.join(saving_dir, "figs")
     os.makedirs(fig_dir, exist_ok=True)
-    fig_path = os.path.join(fig_dir, f"cross_{train_name}_to_{test_name}_{model_name}.pdf")
+    fig_path = os.path.join(fig_dir, f"cross_{train_name}_to_{test_name}_{model_name}_{POOLING_VERSION}.pdf")
     plt.savefig(fig_path, bbox_inches="tight")
     print(f"--> 跨数据集可视化已保存: {fig_path}")
     plt.close(fig)
@@ -557,7 +560,7 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
     os.makedirs(saving_dir, exist_ok=True)
     for name, r in results.items():
         if r['model'] is not None:
-            dump_path = os.path.join(saving_dir, f"{name}_hidden_state_{dataset_name}.joblib")
+            dump_path = os.path.join(saving_dir, f"{name}_hidden_state_{dataset_name}_{POOLING_VERSION}.joblib")
             dump(r['model'], dump_path)
 
     # 异常点检测：查找 feature norm 最大的样本
