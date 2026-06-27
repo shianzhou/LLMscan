@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import IsolationForest
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
@@ -64,6 +65,35 @@ def evaluate(model, features, labels):
     }
 
 
+def evaluate_iforest(train_features, train_labels, test_features, test_labels, random_state):
+    train_labels = np.asarray(train_labels)
+    test_labels = np.asarray(test_labels)
+    normal_features = train_features[train_labels == 0]
+    if len(normal_features) == 0:
+        raise ValueError("IForest requires at least one non_adv training sample.")
+
+    model = IsolationForest(contamination=0.1, random_state=random_state, n_jobs=-1)
+    model.fit(normal_features)
+
+    scores = -model.score_samples(test_features)
+    train_scores = -model.score_samples(normal_features)
+    threshold = np.percentile(train_scores, 90)
+    predictions = (scores > threshold).astype(int)
+
+    tn, fp, fn, tp = confusion_matrix(test_labels, predictions).ravel()
+    return {
+        "ACC": accuracy_score(test_labels, predictions),
+        "F1": f1_score(test_labels, predictions),
+        "ROC_AUC": roc_auc_score(test_labels, scores),
+        "FPR": fp / (fp + tn) if (fp + tn) else 0.0,
+        "FNR": fn / (fn + tp) if (fn + tp) else 0.0,
+        "TN": tn,
+        "FP": fp,
+        "FN": fn,
+        "TP": tp,
+    }
+
+
 def build_results(data, random_state):
     rows = []
 
@@ -90,6 +120,18 @@ def build_results(data, random_state):
                     **evaluate(classifier, test_x, test_y),
                 }
             )
+        rows.append(
+            {
+                "mode": "same_dataset_7_3",
+                "train_set": dataset_name,
+                "test_set": dataset_name,
+                "classifier": "IForest",
+                "train_n": len(train_y),
+                "test_n": len(test_y),
+                "feature_dim": features.shape[1],
+                **evaluate_iforest(train_x, train_y, test_x, test_y, random_state),
+            }
+        )
 
     for train_name, (train_x, train_y) in data.items():
         for test_name, (test_x, test_y) in data.items():
@@ -110,6 +152,18 @@ def build_results(data, random_state):
                         **evaluate(classifier, test_x, test_y),
                     }
                 )
+            rows.append(
+                {
+                    "mode": "cross_dataset_full",
+                    "train_set": train_name,
+                    "test_set": test_name,
+                    "classifier": "IForest",
+                    "train_n": len(train_y),
+                    "test_n": len(test_y),
+                    "feature_dim": train_x.shape[1],
+                    **evaluate_iforest(train_x, train_y, test_x, test_y, random_state),
+                }
+            )
 
     return pd.DataFrame(rows)
 
@@ -121,8 +175,9 @@ def write_markdown(df, output_path, pooling):
     cross = df[df["mode"] == "cross_dataset_full"].copy()
     lr_cross = cross[cross["classifier"] == "LR"].copy()
     mlp_cross = cross[cross["classifier"] == "MLP"].copy()
+    iforest_cross = cross[cross["classifier"] == "IForest"].copy()
 
-    for table in [same, cross, lr_cross, mlp_cross]:
+    for table in [same, cross, lr_cross, mlp_cross, iforest_cross]:
         table[metric_cols] = table[metric_cols].round(4)
 
     best_lr = lr_cross.sort_values("ACC", ascending=False).iloc[0]
@@ -147,6 +202,7 @@ def write_markdown(df, output_path, pooling):
 
         file.write("## 结论速览\n\n")
         file.write("- 同数据集 7:3 切分下，AutoDAN、GCG、PAP 的 LR/MLP 均达到 `ACC = 1.0000`。\n")
+        file.write("- IForest 为单分类异常检测，仅使用训练集中的 non_adv 样本拟合。\n")
         file.write(
             f"- LR 跨数据集最佳方向：`{best_lr['train_set']} -> {best_lr['test_set']}`，"
             f"`ACC = {best_lr['ACC']:.4f}`，`F1 = {best_lr['F1']:.4f}`，"
@@ -165,6 +221,8 @@ def write_markdown(df, output_path, pooling):
         file.write(lr_cross[display_cols].to_markdown(index=False))
         file.write("\n\n## 跨数据集结果（MLP）\n\n")
         file.write(mlp_cross[display_cols].to_markdown(index=False))
+        file.write("\n\n## 跨数据集结果（IForest）\n\n")
+        file.write(iforest_cross[display_cols].to_markdown(index=False))
         file.write("\n\n## 完整明细\n\n")
         file.write("> [!note] 字段说明\n")
         file.write("> `FPR` 表示正常样本被误判为 jailbreak 的比例；`FNR` 表示 jailbreak 样本被漏判为正常的比例。\n\n")

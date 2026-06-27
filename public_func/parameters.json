@@ -6,5 +6,6 @@
       "n_last_layers": 5,
       "random_state": 42,
       "if_visualize": true,
-      "saving_dir": "outputs_hiddenstate/qwen2.5-1.5b/"
+      "saving_dir": "outputs_hiddenstate/qwen2.5-1.5b/",
+      "run_all": true
 }

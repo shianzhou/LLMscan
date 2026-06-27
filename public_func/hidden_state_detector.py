@@ -31,6 +31,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, confusion_m
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.ensemble import IsolationForest
 import pandas as pd
 from joblib import dump
 
@@ -221,6 +222,66 @@ def extract_hidden_states_batched(prompts, mt, n_last_layers=5, batch_size=16, d
 # 4. 训练与评估
 # ============================================================
 
+def _evaluate_iforest(X_train, y_train, X_test, y_test, contamination=0.1, random_state=42):
+    """
+    Isolation Forest 单分类：仅用 non_adv（label=0）训练，全量测试。
+    返回 (acc, f1, auc, fpr, model)。
+    """
+    y_train = np.asarray(y_train)
+    y_test = np.asarray(y_test)
+
+    # 只取 normal 样本训练
+    X_normal = X_train[y_train == 0]
+    if len(X_normal) == 0:
+        print("    [IForest] 训练集中无 normal 样本，跳过")
+        return None, None, None, None, None, 0, 0, 0, 0
+
+    clf = IsolationForest(contamination=contamination, random_state=random_state, n_jobs=-1)
+    clf.fit(X_normal)
+
+    # score_samples 返回负值，越小越异常；取负后越大越异常
+    scores = -clf.score_samples(X_test)
+    # 用训练集的 contamination 百分位作为阈值
+    train_scores = -clf.score_samples(X_normal)
+    threshold = np.percentile(train_scores, 100 * (1 - contamination))
+    y_pred = (scores > threshold).astype(int)
+
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    try:
+        auc = roc_auc_score(y_test, scores)
+    except ValueError:
+        auc = float('nan')
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+
+    print(f"    ACC: {acc:.4f}  F1: {f1:.4f}  ROC-AUC: {auc:.4f}  FPR: {fpr:.4f}  FNR: {fnr:.4f}")
+    return acc, f1, auc, fpr, fnr, clf, int(tn), int(fp), int(fn), int(tp)
+
+
+def _write_csv_result(results, mode, train_name, test_name, train_n, test_n,
+                       feature_dim, saving_dir):
+    """将单次实验的全部分类器结果追加写入 CSV。"""
+    csv_path = os.path.join(saving_dir, f"results_{POOLING_VERSION}.csv")
+    os.makedirs(saving_dir, exist_ok=True)
+
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', encoding='utf-8', newline='') as f:
+        if write_header:
+            f.write("mode,train_set,test_set,classifier,train_n,test_n,feature_dim,"
+                    "ACC,F1,ROC_AUC,FPR,FNR,TN,FP,FN,TP\n")
+        for name in ['logistic', 'mlp', 'iforest']:
+            r = results.get(name)
+            if r is None or r['acc'] is None:
+                continue
+            classifier_name = {"logistic": "LR", "mlp": "MLP", "iforest": "IForest"}[name]
+            f.write(f"{mode},{train_name},{test_name},{classifier_name},{train_n},{test_n},"
+                    f"{feature_dim},{r['acc']:.6f},{r['f1']:.6f},{r['auc']:.6f},"
+                    f"{r['fpr']:.6f},{r.get('fnr',0):.6f},{r.get('tn',0)},{r.get('fp',0)},"
+                    f"{r.get('fn',0)},{r.get('tp',0)}\n")
+
+
 def train_evaluate(features, labels, test_size=0.3, random_state=42):
     """
     训练 LR + MLP 分类器并评估。
@@ -232,7 +293,7 @@ def train_evaluate(features, labels, test_size=0.3, random_state=42):
         features, labels, test_size=test_size,
         random_state=random_state, stratify=labels
     )
-    print(f"--> 训练集: {X_train.shape[0]} 条, 测试集: {X_test.shape[0]} 条")
+    print(f"--> 训练集: {X_train.shape[0]} 条 (adv={sum(1 for v in y_train if v == 1)}, non_adv={sum(1 for v in y_train if v == 0)}), 测试集: {X_test.shape[0]} 条 (adv={sum(1 for v in y_test if v == 1)}, non_adv={sum(1 for v in y_test if v == 0)})")
     print(f"    特征维度: {X_train.shape[1]}")
 
     results = {}
@@ -245,8 +306,11 @@ def train_evaluate(features, labels, test_size=0.3, random_state=42):
     f1 = f1_score(y_test, y_pred)
     tn, fp, fn, tp = conf_matrix.ravel()
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
     print(f"    ACC: {acc:.4f}  F1: {f1:.4f}  ROC-AUC: {auc:.4f}  FPR: {fpr:.4f}")
-    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'model': clf_lr}
+    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'fnr': fnr,
+                            'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp),
+                            'model': clf_lr}
 
     # --- MLP ---
     print("\n========== MLP Classifier ==========")
@@ -256,8 +320,19 @@ def train_evaluate(features, labels, test_size=0.3, random_state=42):
     f1_2 = f1_score(y_test, y_pred2)
     tn2, fp2, fn2, tp2 = cm2.ravel()
     fpr2 = fp2 / (fp2 + tn2) if (fp2 + tn2) > 0 else 0.0
+    fnr2 = fn2 / (fn2 + tp2) if (fn2 + tp2) > 0 else 0.0
     print(f"    ACC: {acc2:.4f}  F1: {f1_2:.4f}  ROC-AUC: {auc2:.4f}  FPR: {fpr2:.4f}")
-    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'model': clf_mlp}
+    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'fnr': fnr2,
+                      'tn': int(tn2), 'fp': int(fp2), 'fn': int(fn2), 'tp': int(tp2),
+                      'model': clf_mlp}
+
+    # --- Isolation Forest（单分类，仅用 non_adv 训练） ---
+    print("\n========== Isolation Forest ==========")
+    acc3, f1_3, auc3, fpr3, fnr3, clf_if, tn3, fp3, fn3, tp3 = _evaluate_iforest(
+        X_train, y_train, X_test, y_test, random_state=random_state)
+    results['iforest'] = {'acc': acc3, 'f1': f1_3, 'auc': auc3, 'fpr': fpr3, 'fnr': fnr3,
+                          'tn': tn3, 'fp': fp3, 'fn': fn3, 'tp': tp3,
+                          'model': clf_if}
 
     return results
 
@@ -435,7 +510,7 @@ def _train_on_full_test_on_heldout(train_features, train_labels,
     results = {}
     X_train, y_train = np.array(train_features), np.array(train_labels)
     X_test, y_test = np.array(test_features), np.array(test_labels)
-    print(f"    训练集: {X_train.shape[0]} 条, 测试集: {X_test.shape[0]} 条")
+    print(f"    训练集: {X_train.shape[0]} 条 (adv={sum(1 for v in y_train if v == 1)}, non_adv={sum(1 for v in y_train if v == 0)}), 测试集: {X_test.shape[0]} 条 (adv={sum(1 for v in y_test if v == 1)}, non_adv={sum(1 for v in y_test if v == 0)})")
 
     # --- Logistic Regression ---
     print("\n========== Logistic Regression (cross) ==========")
@@ -445,8 +520,11 @@ def _train_on_full_test_on_heldout(train_features, train_labels,
     f1 = f1_score(y_test, y_pred)
     tn, fp, fn, tp = cm.ravel()
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
     print(f"    ACC: {acc:.4f}  F1: {f1:.4f}  ROC-AUC: {auc:.4f}  FPR: {fpr:.4f}")
-    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'model': clf_lr}
+    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'fnr': fnr,
+                            'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp),
+                            'model': clf_lr}
 
     # --- MLP ---
     print("\n========== MLP Classifier (cross) ==========")
@@ -456,8 +534,19 @@ def _train_on_full_test_on_heldout(train_features, train_labels,
     f1_2 = f1_score(y_test, y_pred2)
     tn2, fp2, fn2, tp2 = cm2.ravel()
     fpr2 = fp2 / (fp2 + tn2) if (fp2 + tn2) > 0 else 0.0
+    fnr2 = fn2 / (fn2 + tp2) if (fn2 + tp2) > 0 else 0.0
     print(f"    ACC: {acc2:.4f}  F1: {f1_2:.4f}  ROC-AUC: {auc2:.4f}  FPR: {fpr2:.4f}")
-    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'model': clf_mlp}
+    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'fnr': fnr2,
+                      'tn': int(tn2), 'fp': int(fp2), 'fn': int(fn2), 'tp': int(tp2),
+                      'model': clf_mlp}
+
+    # --- Isolation Forest（单分类，仅用 train 中 non_adv 训练） ---
+    print("\n========== Isolation Forest (cross) ==========")
+    acc3, f1_3, auc3, fpr3, fnr3, clf_if, tn3, fp3, fn3, tp3 = _evaluate_iforest(
+        X_train, y_train, X_test, y_test, random_state=random_state)
+    results['iforest'] = {'acc': acc3, 'f1': f1_3, 'auc': auc3, 'fpr': fpr3, 'fnr': fnr3,
+                          'tn': tn3, 'fp': fp3, 'fn': fn3, 'tp': tp3,
+                          'model': clf_if}
 
     return results
 
@@ -516,6 +605,11 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
             test_features, test_labels,
             random_state=random_state)
 
+        # CSV 记录
+        _write_csv_result(results, "cross_dataset_full", dataset_name, test_name,
+                          train_features.shape[0], test_features.shape[0],
+                          train_features.shape[1], saving_dir)
+
         # 可视化：train + test 在同一 PCA/t-SNE 上
         if if_visualize:
             _visualize_cross_dataset(
@@ -529,9 +623,13 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
         print(f"{'='*60}")
         print(f"  {'分类器':<15} {'ACC':>8} {'F1':>8} {'ROC-AUC':>8} {'FPR':>8}")
         print(f"  {'-'*47}")
-        for name in ['logistic', 'mlp']:
+        for name in ['logistic', 'mlp', 'iforest']:
             r = results[name]
-            print(f"  {name:<15} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}")
+            acc_s = f"{r['acc']:>8.4f}" if r['acc'] is not None else f"  {'N/A':>6}"
+            f1_s = f"{r['f1']:>8.4f}" if r['f1'] is not None else f"  {'N/A':>6}"
+            auc_s = f"{r['auc']:>8.4f}" if r['auc'] is not None else f"  {'N/A':>6}"
+            fpr_s = f"{r['fpr']:>8.4f}" if r['fpr'] is not None else f"  {'N/A':>6}"
+            print(f"  {name:<15} {acc_s} {f1_s} {auc_s} {fpr_s}")
 
         return results
 
@@ -555,6 +653,19 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
     # Step 3: 训练评估
     print("\n[3/3] 训练分类器...")
     results = train_evaluate(features, labels, test_size=test_size, random_state=random_state)
+
+    # CSV 记录：使用 sklearn 实际 split 后的样本数，避免四舍五入口径偏差。
+    _, test_features_for_count, _, _ = train_test_split(
+        features,
+        labels,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=labels,
+    )
+    test_n_actual = test_features_for_count.shape[0]
+    train_n_actual = features.shape[0] - test_n_actual
+    _write_csv_result(results, "same_dataset_7_3", dataset_name, dataset_name,
+                      train_n_actual, test_n_actual, features.shape[1], saving_dir)
 
     # 保存模型
     os.makedirs(saving_dir, exist_ok=True)
@@ -593,9 +704,13 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
     print(f"{'='*60}")
     print(f"  {'分类器':<15} {'ACC':>8} {'F1':>8} {'ROC-AUC':>8} {'FPR':>8}")
     print(f"  {'-'*47}")
-    for name in ['logistic', 'mlp']:
+    for name in ['logistic', 'mlp', 'iforest']:
         r = results[name]
-        print(f"  {name:<15} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}")
+        acc_s = f"{r['acc']:>8.4f}" if r['acc'] is not None else f"  {'N/A':>6}"
+        f1_s = f"{r['f1']:>8.4f}" if r['f1'] is not None else f"  {'N/A':>6}"
+        auc_s = f"{r['auc']:>8.4f}" if r['auc'] is not None else f"  {'N/A':>6}"
+        fpr_s = f"{r['fpr']:>8.4f}" if r['fpr'] is not None else f"  {'N/A':>6}"
+        print(f"  {name:<15} {acc_s} {f1_s} {auc_s} {fpr_s}")
 
     return results
 
@@ -684,7 +799,8 @@ if __name__ == '__main__':
         print(f"--> 测试数据集: {test_dataset_str}, 共 {len(test_dataset)} 条")
 
     # --- 批量运行模式 ---
-    if getattr(args, 'run_all', False):
+    run_all = getattr(args, 'run_all', False) or parameters.get('run_all', False)
+    if run_all:
         ALL_DATASETS = [AutoDAN, GCG, PAP]
         all_results = {}
 
