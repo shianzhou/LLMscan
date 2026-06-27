@@ -31,6 +31,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, confusion_m
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.ensemble import IsolationForest
 import pandas as pd
 from joblib import dump
 
@@ -42,6 +43,16 @@ np.random.seed(0)
 torch.manual_seed(0)
 
 POOLING_VERSION = "lasttoken_v2"
+
+
+def _safe_artifact_name(name):
+    """Make model/dataset names safe for filenames while keeping them readable."""
+    return str(name).replace("\\", "_").replace("/", "_")
+
+
+def _make_output_slug(model_name):
+    slug = str(model_name).strip().strip("/\\").replace("\\", "/").replace("/", "_")
+    return slug or "custom_model"
 
 
 # ============================================================
@@ -92,7 +103,7 @@ def _make_cache_path(saving_dir, dataset_name, model_name, n_last_layers,
                       pooling, sample_count):
     """构造缓存文件路径。"""
     cache_dir = os.path.join(saving_dir, "cache")
-    safe_model = model_name.replace("/", "_")
+    safe_model = _safe_artifact_name(model_name)
     fname = f"{dataset_name}_{safe_model}_last{n_last_layers}_{pooling}_samples{sample_count}.npz"
     return os.path.join(cache_dir, fname)
 
@@ -221,6 +232,66 @@ def extract_hidden_states_batched(prompts, mt, n_last_layers=5, batch_size=16, d
 # 4. 训练与评估
 # ============================================================
 
+def _evaluate_iforest(X_train, y_train, X_test, y_test, contamination=0.1, random_state=42):
+    """
+    Isolation Forest 单分类：仅用 non_adv（label=0）训练，全量测试。
+    返回 (acc, f1, auc, fpr, model)。
+    """
+    y_train = np.asarray(y_train)
+    y_test = np.asarray(y_test)
+
+    # 只取 normal 样本训练
+    X_normal = X_train[y_train == 0]
+    if len(X_normal) == 0:
+        print("    [IForest] 训练集中无 normal 样本，跳过")
+        return None, None, None, None, None, 0, 0, 0, 0
+
+    clf = IsolationForest(contamination=contamination, random_state=random_state, n_jobs=-1)
+    clf.fit(X_normal)
+
+    # score_samples 返回负值，越小越异常；取负后越大越异常
+    scores = -clf.score_samples(X_test)
+    # 用训练集的 contamination 百分位作为阈值
+    train_scores = -clf.score_samples(X_normal)
+    threshold = np.percentile(train_scores, 100 * (1 - contamination))
+    y_pred = (scores > threshold).astype(int)
+
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    try:
+        auc = roc_auc_score(y_test, scores)
+    except ValueError:
+        auc = float('nan')
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+
+    print(f"    ACC: {acc:.4f}  F1: {f1:.4f}  ROC-AUC: {auc:.4f}  FPR: {fpr:.4f}  FNR: {fnr:.4f}")
+    return acc, f1, auc, fpr, fnr, clf, int(tn), int(fp), int(fn), int(tp)
+
+
+def _write_csv_result(results, mode, train_name, test_name, train_n, test_n,
+                       feature_dim, saving_dir):
+    """将单次实验的全部分类器结果追加写入 CSV。"""
+    csv_path = os.path.join(saving_dir, f"results_{POOLING_VERSION}.csv")
+    os.makedirs(saving_dir, exist_ok=True)
+
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', encoding='utf-8', newline='') as f:
+        if write_header:
+            f.write("mode,train_set,test_set,classifier,train_n,test_n,feature_dim,"
+                    "ACC,F1,ROC_AUC,FPR,FNR,TN,FP,FN,TP\n")
+        for name in ['logistic', 'mlp', 'iforest']:
+            r = results.get(name)
+            if r is None or r['acc'] is None:
+                continue
+            classifier_name = {"logistic": "LR", "mlp": "MLP", "iforest": "IForest"}[name]
+            f.write(f"{mode},{train_name},{test_name},{classifier_name},{train_n},{test_n},"
+                    f"{feature_dim},{r['acc']:.6f},{r['f1']:.6f},{r['auc']:.6f},"
+                    f"{r['fpr']:.6f},{r.get('fnr',0):.6f},{r.get('tn',0)},{r.get('fp',0)},"
+                    f"{r.get('fn',0)},{r.get('tp',0)}\n")
+
+
 def train_evaluate(features, labels, test_size=0.3, random_state=42):
     """
     训练 LR + MLP 分类器并评估。
@@ -232,7 +303,7 @@ def train_evaluate(features, labels, test_size=0.3, random_state=42):
         features, labels, test_size=test_size,
         random_state=random_state, stratify=labels
     )
-    print(f"--> 训练集: {X_train.shape[0]} 条, 测试集: {X_test.shape[0]} 条")
+    print(f"--> 训练集: {X_train.shape[0]} 条 (adv={sum(1 for v in y_train if v == 1)}, non_adv={sum(1 for v in y_train if v == 0)}), 测试集: {X_test.shape[0]} 条 (adv={sum(1 for v in y_test if v == 1)}, non_adv={sum(1 for v in y_test if v == 0)})")
     print(f"    特征维度: {X_train.shape[1]}")
 
     results = {}
@@ -245,8 +316,11 @@ def train_evaluate(features, labels, test_size=0.3, random_state=42):
     f1 = f1_score(y_test, y_pred)
     tn, fp, fn, tp = conf_matrix.ravel()
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
     print(f"    ACC: {acc:.4f}  F1: {f1:.4f}  ROC-AUC: {auc:.4f}  FPR: {fpr:.4f}")
-    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'model': clf_lr}
+    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'fnr': fnr,
+                            'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp),
+                            'model': clf_lr}
 
     # --- MLP ---
     print("\n========== MLP Classifier ==========")
@@ -256,8 +330,19 @@ def train_evaluate(features, labels, test_size=0.3, random_state=42):
     f1_2 = f1_score(y_test, y_pred2)
     tn2, fp2, fn2, tp2 = cm2.ravel()
     fpr2 = fp2 / (fp2 + tn2) if (fp2 + tn2) > 0 else 0.0
+    fnr2 = fn2 / (fn2 + tp2) if (fn2 + tp2) > 0 else 0.0
     print(f"    ACC: {acc2:.4f}  F1: {f1_2:.4f}  ROC-AUC: {auc2:.4f}  FPR: {fpr2:.4f}")
-    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'model': clf_mlp}
+    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'fnr': fnr2,
+                      'tn': int(tn2), 'fp': int(fp2), 'fn': int(fn2), 'tp': int(tp2),
+                      'model': clf_mlp}
+
+    # --- Isolation Forest（单分类，仅用 non_adv 训练） ---
+    print("\n========== Isolation Forest ==========")
+    acc3, f1_3, auc3, fpr3, fnr3, clf_if, tn3, fp3, fn3, tp3 = _evaluate_iforest(
+        X_train, y_train, X_test, y_test, random_state=random_state)
+    results['iforest'] = {'acc': acc3, 'f1': f1_3, 'auc': auc3, 'fpr': fpr3, 'fnr': fnr3,
+                          'tn': tn3, 'fp': fp3, 'fn': fn3, 'tp': tp3,
+                          'model': clf_if}
 
     return results
 
@@ -351,10 +436,11 @@ def visualize_pca_tsne(features, labels, dataset_name, model_name, saving_dir,
     # 保存
     fig_dir = os.path.join(saving_dir, "figs")
     os.makedirs(fig_dir, exist_ok=True)
+    safe_model = _safe_artifact_name(model_name)
     if remove_top_outlier:
-        fig_name = f"hidden_state_{dataset_name}_{model_name}_{POOLING_VERSION}_remove_top1_outlier.pdf"
+        fig_name = f"hidden_state_{dataset_name}_{safe_model}_{POOLING_VERSION}_remove_top1_outlier.pdf"
     else:
-        fig_name = f"hidden_state_{dataset_name}_{model_name}_{POOLING_VERSION}.pdf"
+        fig_name = f"hidden_state_{dataset_name}_{safe_model}_{POOLING_VERSION}.pdf"
     fig_path = os.path.join(fig_dir, fig_name)
     plt.savefig(fig_path, bbox_inches="tight")
     print(f"--> 可视化已保存: {fig_path}")
@@ -416,7 +502,8 @@ def _visualize_cross_dataset(train_features, train_labels, train_name,
     plt.tight_layout()
     fig_dir = os.path.join(saving_dir, "figs")
     os.makedirs(fig_dir, exist_ok=True)
-    fig_path = os.path.join(fig_dir, f"cross_{train_name}_to_{test_name}_{model_name}_{POOLING_VERSION}.pdf")
+    safe_model = _safe_artifact_name(model_name)
+    fig_path = os.path.join(fig_dir, f"cross_{train_name}_to_{test_name}_{safe_model}_{POOLING_VERSION}.pdf")
     plt.savefig(fig_path, bbox_inches="tight")
     print(f"--> 跨数据集可视化已保存: {fig_path}")
     plt.close(fig)
@@ -435,7 +522,7 @@ def _train_on_full_test_on_heldout(train_features, train_labels,
     results = {}
     X_train, y_train = np.array(train_features), np.array(train_labels)
     X_test, y_test = np.array(test_features), np.array(test_labels)
-    print(f"    训练集: {X_train.shape[0]} 条, 测试集: {X_test.shape[0]} 条")
+    print(f"    训练集: {X_train.shape[0]} 条 (adv={sum(1 for v in y_train if v == 1)}, non_adv={sum(1 for v in y_train if v == 0)}), 测试集: {X_test.shape[0]} 条 (adv={sum(1 for v in y_test if v == 1)}, non_adv={sum(1 for v in y_test if v == 0)})")
 
     # --- Logistic Regression ---
     print("\n========== Logistic Regression (cross) ==========")
@@ -445,8 +532,11 @@ def _train_on_full_test_on_heldout(train_features, train_labels,
     f1 = f1_score(y_test, y_pred)
     tn, fp, fn, tp = cm.ravel()
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
     print(f"    ACC: {acc:.4f}  F1: {f1:.4f}  ROC-AUC: {auc:.4f}  FPR: {fpr:.4f}")
-    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'model': clf_lr}
+    results['logistic'] = {'acc': acc, 'f1': f1, 'auc': auc, 'fpr': fpr, 'fnr': fnr,
+                            'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp),
+                            'model': clf_lr}
 
     # --- MLP ---
     print("\n========== MLP Classifier (cross) ==========")
@@ -456,39 +546,25 @@ def _train_on_full_test_on_heldout(train_features, train_labels,
     f1_2 = f1_score(y_test, y_pred2)
     tn2, fp2, fn2, tp2 = cm2.ravel()
     fpr2 = fp2 / (fp2 + tn2) if (fp2 + tn2) > 0 else 0.0
+    fnr2 = fn2 / (fn2 + tp2) if (fn2 + tp2) > 0 else 0.0
     print(f"    ACC: {acc2:.4f}  F1: {f1_2:.4f}  ROC-AUC: {auc2:.4f}  FPR: {fpr2:.4f}")
-    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'model': clf_mlp}
+    results['mlp'] = {'acc': acc2, 'f1': f1_2, 'auc': auc2, 'fpr': fpr2, 'fnr': fnr2,
+                      'tn': int(tn2), 'fp': int(fp2), 'fn': int(fn2), 'tp': int(tp2),
+                      'model': clf_mlp}
+
+    # --- Isolation Forest（单分类，仅用 train 中 non_adv 训练） ---
+    print("\n========== Isolation Forest (cross) ==========")
+    acc3, f1_3, auc3, fpr3, fnr3, clf_if, tn3, fp3, fn3, tp3 = _evaluate_iforest(
+        X_train, y_train, X_test, y_test, random_state=random_state)
+    results['iforest'] = {'acc': acc3, 'f1': f1_3, 'auc': auc3, 'fpr': fpr3, 'fnr': fnr3,
+                          'tn': tn3, 'fp': fp3, 'fn': fn3, 'tp': tp3,
+                          'model': clf_if}
 
     return results
 
 
 # ============================================================
-# 8. 结果日志
-# ============================================================
-
-def _log_results(saving_dir, model_name, train_name, test_name, results):
-    """将单次实验结果追加写入 results.txt。"""
-    log_path = os.path.join(saving_dir, "results.txt")
-    os.makedirs(saving_dir, exist_ok=True)
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 首次写入时加表头
-    write_header = not os.path.exists(log_path)
-    with open(log_path, 'a', encoding='utf-8') as f:
-        if write_header:
-            f.write(f"{'time':<20} {'model':<40} {'pooling':<15} {'train_set':<12} {'test_set':<12} "
-                    f"{'classifier':<10} {'ACC':>8} {'F1':>8} {'ROC':>8} {'FPR':>8}\n")
-            f.write("-" * 146 + "\n")
-        for name in ['logistic', 'mlp']:
-            r = results[name]
-            f.write(f"{timestamp:<20} {model_name:<40} {POOLING_VERSION:<15} {train_name:<12} {test_name:<12} "
-                    f"{name:<10} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}\n")
-    print(f"--> 结果已追加: {log_path}")
-
-
-# ============================================================
-# 9. 主流程
+# 8. 主流程
 # ============================================================
 
 def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
@@ -541,6 +617,11 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
             test_features, test_labels,
             random_state=random_state)
 
+        # CSV 记录
+        _write_csv_result(results, "cross_dataset_full", dataset_name, test_name,
+                          train_features.shape[0], test_features.shape[0],
+                          train_features.shape[1], saving_dir)
+
         # 可视化：train + test 在同一 PCA/t-SNE 上
         if if_visualize:
             _visualize_cross_dataset(
@@ -554,11 +635,14 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
         print(f"{'='*60}")
         print(f"  {'分类器':<15} {'ACC':>8} {'F1':>8} {'ROC-AUC':>8} {'FPR':>8}")
         print(f"  {'-'*47}")
-        for name in ['logistic', 'mlp']:
+        for name in ['logistic', 'mlp', 'iforest']:
             r = results[name]
-            print(f"  {name:<15} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}")
+            acc_s = f"{r['acc']:>8.4f}" if r['acc'] is not None else f"  {'N/A':>6}"
+            f1_s = f"{r['f1']:>8.4f}" if r['f1'] is not None else f"  {'N/A':>6}"
+            auc_s = f"{r['auc']:>8.4f}" if r['auc'] is not None else f"  {'N/A':>6}"
+            fpr_s = f"{r['fpr']:>8.4f}" if r['fpr'] is not None else f"  {'N/A':>6}"
+            print(f"  {name:<15} {acc_s} {f1_s} {auc_s} {fpr_s}")
 
-        _log_results(saving_dir, model_name, dataset_name, test_name, results)
         return results
 
     # --- 同数据集模式（原有逻辑） ---
@@ -581,6 +665,19 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
     # Step 3: 训练评估
     print("\n[3/3] 训练分类器...")
     results = train_evaluate(features, labels, test_size=test_size, random_state=random_state)
+
+    # CSV 记录：使用 sklearn 实际 split 后的样本数，避免四舍五入口径偏差。
+    _, test_features_for_count, _, _ = train_test_split(
+        features,
+        labels,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=labels,
+    )
+    test_n_actual = test_features_for_count.shape[0]
+    train_n_actual = features.shape[0] - test_n_actual
+    _write_csv_result(results, "same_dataset_7_3", dataset_name, dataset_name,
+                      train_n_actual, test_n_actual, features.shape[1], saving_dir)
 
     # 保存模型
     os.makedirs(saving_dir, exist_ok=True)
@@ -619,22 +716,176 @@ def run_hidden_state_detection(dataset, mt, model_name, saving_dir,
     print(f"{'='*60}")
     print(f"  {'分类器':<15} {'ACC':>8} {'F1':>8} {'ROC-AUC':>8} {'FPR':>8}")
     print(f"  {'-'*47}")
-    for name in ['logistic', 'mlp']:
+    for name in ['logistic', 'mlp', 'iforest']:
         r = results[name]
-        print(f"  {name:<15} {r['acc']:>8.4f} {r['f1']:>8.4f} {r['auc']:>8.4f} {r['fpr']:>8.4f}")
+        acc_s = f"{r['acc']:>8.4f}" if r['acc'] is not None else f"  {'N/A':>6}"
+        f1_s = f"{r['f1']:>8.4f}" if r['f1'] is not None else f"  {'N/A':>6}"
+        auc_s = f"{r['auc']:>8.4f}" if r['auc'] is not None else f"  {'N/A':>6}"
+        fpr_s = f"{r['fpr']:>8.4f}" if r['fpr'] is not None else f"  {'N/A':>6}"
+        print(f"  {name:<15} {acc_s} {f1_s} {auc_s} {fpr_s}")
 
-    _log_results(saving_dir, model_name, dataset_name, dataset_name, results)
     return results
 
 
 # ============================================================
-# 10. 命令行入口
+# 9. 命令行入口
 # ============================================================
 
 def load_parameters(file_path):
     with open(file_path, 'r') as file:
         parameters = json.load(file)
     return parameters
+
+
+def _prepare_model_parameters(parameters, args):
+    """Resolve CLI/JSON model settings into concrete server paths."""
+    cli_model_path = args.model_path
+    cli_model_name = args.model_name
+    cli_saving_dir = args.saving_dir
+    json_model_path = parameters.get('model_path')
+    json_model_name = parameters.get('model_name')
+
+    if cli_model_path or cli_model_name:
+        if not cli_model_name:
+            raise ValueError("--model_name is required when overriding --model_path.")
+        resolved = {
+            "model_path": cli_model_path or "",
+            "model_name": cli_model_name,
+            "saving_dir": cli_saving_dir or f"outputs_hiddenstate/{_make_output_slug(cli_model_name)}",
+        }
+    elif json_model_name:
+        resolved = {
+            "model_path": json_model_path or "",
+            "model_name": json_model_name,
+            "saving_dir": cli_saving_dir or parameters.get("saving_dir") or f"outputs_hiddenstate/{_make_output_slug(json_model_name)}",
+        }
+    else:
+        raise ValueError(
+            "未指定模型。请使用 --model_name 指定模型 ID 或本地模型目录。"
+        )
+
+    parameters = parameters.copy()
+    parameters['model_path'] = resolved['model_path']
+    parameters['model_name'] = resolved['model_name']
+    parameters['saving_dir'] = resolved['saving_dir']
+    return parameters
+
+
+def _join_model_path(model_path, model_name):
+    if os.path.isabs(model_name) or not model_path:
+        return model_name
+    return os.path.join(model_path, model_name)
+
+
+def _run_with_parameters(parameters, args):
+    print("--> 参数:", parameters)
+
+    model_path = parameters['model_path']
+    model_name = parameters['model_name']
+    saving_dir = parameters.get('saving_dir', 'outputs_hiddenstate/')
+    n_last_layers = parameters.get('n_last_layers', 5)
+    max_samples = parameters.get('max_samples', None)
+    test_size = parameters.get('test_size', 0.3)
+    random_state = parameters.get('random_state', 42)
+    if_visualize = parameters.get('if_visualize', True)
+
+    # 加载模型
+    print(f"--> 加载模型: {model_path}{model_name}")
+    model_name_or_path = _join_model_path(model_path, model_name)
+    try:
+        mt = ModelAndTokenizer(
+            model_name_or_path,
+            low_cpu_mem_usage=True,
+            device=getattr(args, 'device', 'cuda:0'),
+            local_files_only=getattr(args, 'local_files_only', False),
+        )
+    except OSError as exc:
+        print("\n[模型加载失败]")
+        print(f"  当前模型参数: {model_name_or_path}")
+        print("  如果服务器不能访问 huggingface.co，请使用已下载好的本地模型目录，例如：")
+        print('    python public_func/hidden_state_detector.py --model_name "/root/autodl-tmp/models/Qwen2.5-7B-Instruct" --saving_dir "outputs_hiddenstate/qwen2.5-7b" --run_all --force_extract --local_files_only')
+        print("  本地模型目录中应包含 config.json、tokenizer 文件和权重文件。")
+        raise RuntimeError(
+            "Model loading failed. Use a local model directory on offline servers, "
+            "or enable network access / pre-download the Hugging Face model cache."
+        ) from exc
+    mt.model
+    print("--> 模型加载成功")
+    print(f"    层数: {mt.num_layers}, hidden_size: {mt.model.config.hidden_size}")
+
+    # 加载训练数据集
+    dataset = eval(parameters['dataset'])
+    print(f"--> 训练数据集: {parameters['dataset']}, 共 {len(dataset)} 条")
+
+    # 加载测试数据集（跨数据集验证）
+    test_dataset = None
+    test_dataset_str = parameters.get('test_dataset', None)
+    if test_dataset_str:
+        test_dataset = eval(test_dataset_str)
+        print(f"--> 测试数据集: {test_dataset_str}, 共 {len(test_dataset)} 条")
+
+    # --- 批量运行模式 ---
+    run_all = getattr(args, 'run_all', False) or parameters.get('run_all', False)
+    if run_all:
+        ALL_DATASETS = [AutoDAN, GCG, PAP]
+
+        # Phase 1: 提取全部数据集的 features（缓存加速）
+        print(f"\n{'#'*60}")
+        print(f"  Phase 1: 提取所有数据集 hidden states")
+        print(f"{'#'*60}")
+        for DS in ALL_DATASETS:
+            ds = DS()
+            ds_name = ds.__class__.__name__
+            prompts, labels = sample_balanced_dataset(ds, max_samples=max_samples, random_state=random_state)
+            _get_or_extract_features(
+                prompts, labels, mt, ds_name, model_name,
+                saving_dir, n_last_layers, force_extract=getattr(args, 'force_extract', False))
+
+        # Phase 2: 单独跑每个数据集（同数据集 7:3）
+        print(f"\n{'#'*60}")
+        print(f"  Phase 2: 同数据集测试")
+        print(f"{'#'*60}")
+        for DS in ALL_DATASETS:
+            ds = DS()
+            run_hidden_state_detection(
+                dataset=ds, mt=mt, model_name=model_name,
+                saving_dir=saving_dir, n_last_layers=n_last_layers,
+                max_samples=max_samples, test_size=test_size,
+                random_state=random_state, if_visualize=if_visualize,
+                force_extract=getattr(args, 'force_extract', False))
+
+        # Phase 3: 全部交叉验证对
+        print(f"\n{'#'*60}")
+        print(f"  Phase 3: 交叉验证（全部组合）")
+        print(f"{'#'*60}")
+        for TrainDS in ALL_DATASETS:
+            for TestDS in ALL_DATASETS:
+                if TrainDS == TestDS:
+                    continue
+                train_ds = TrainDS()
+                test_ds = TestDS()
+                run_hidden_state_detection(
+                    dataset=train_ds, mt=mt, model_name=model_name,
+                    saving_dir=saving_dir, n_last_layers=n_last_layers,
+                    max_samples=max_samples, test_size=test_size,
+                    random_state=random_state, if_visualize=if_visualize,
+                    test_dataset=test_ds, force_extract=getattr(args, 'force_extract', False))
+        return
+
+    # --- 单次运行模式 ---
+    run_hidden_state_detection(
+        dataset=dataset,
+        mt=mt,
+        model_name=model_name,
+        saving_dir=saving_dir,
+        n_last_layers=n_last_layers,
+        max_samples=max_samples,
+        test_size=test_size,
+        if_visualize=if_visualize,
+        test_dataset=test_dataset,
+        random_state=random_state,
+        force_extract=getattr(args, 'force_extract', False),
+    )
 
 
 if __name__ == '__main__':
@@ -660,14 +911,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # 命令行覆盖
-    if args.model_path:
-        parameters['model_path'] = args.model_path
-    if args.model_name:
-        parameters['model_name'] = args.model_name
     if args.dataset:
         parameters['dataset'] = args.dataset
-    if args.saving_dir:
-        parameters['saving_dir'] = args.saving_dir
     if args.max_samples:
         parameters['max_samples'] = args.max_samples
     if args.n_last_layers:
@@ -679,106 +924,5 @@ if __name__ == '__main__':
     if force_extract:
         print("--> force_extract=True，将忽略缓存重新提取")
 
-    print("--> 参数:", parameters)
-
-    model_path = parameters['model_path']
-    model_name = parameters['model_name']
-    saving_dir = parameters.get('saving_dir', 'outputs_hiddenstate/')
-    # 自动按模型名分子目录，不同模型输出不会互相覆盖
-    safe_model = model_name.replace("/", "_")
-    if not saving_dir.rstrip("/").endswith(safe_model):
-        saving_dir = os.path.join(saving_dir, safe_model)
-    n_last_layers = parameters.get('n_last_layers', 5)
-    max_samples = parameters.get('max_samples', None)
-    test_size = parameters.get('test_size', 0.3)
-    random_state = parameters.get('random_state', 42)
-    if_visualize = parameters.get('if_visualize', True)
-
-    # 加载模型
-    print(f"--> 加载模型: {model_path}{model_name}")
-    mt = ModelAndTokenizer(
-        model_path + model_name,
-        low_cpu_mem_usage=True,
-        device=getattr(args, 'device', 'cuda:0'),
-        local_files_only=getattr(args, 'local_files_only', False),
-    )
-    mt.model
-    print("--> 模型加载成功")
-    print(f"    层数: {mt.num_layers}, hidden_size: {mt.model.config.hidden_size}")
-
-    # 加载训练数据集
-    dataset = eval(parameters['dataset'])
-    print(f"--> 训练数据集: {parameters['dataset']}, 共 {len(dataset)} 条")
-
-    # 加载测试数据集（跨数据集验证）
-    test_dataset = None
-    test_dataset_str = parameters.get('test_dataset', None)
-    if test_dataset_str:
-        test_dataset = eval(test_dataset_str)
-        print(f"--> 测试数据集: {test_dataset_str}, 共 {len(test_dataset)} 条")
-
-    # --- 批量运行模式 ---
-    if getattr(args, 'run_all', False):
-        ALL_DATASETS = [AutoDAN, GCG, PAP]
-        all_results = {}
-
-        # Phase 1: 提取全部数据集的 features（缓存加速）
-        print(f"\n{'#'*60}")
-        print(f"  Phase 1: 提取所有数据集 hidden states")
-        print(f"{'#'*60}")
-        cached_features = {}
-        for DS in ALL_DATASETS:
-            ds = DS()
-            ds_name = ds.__class__.__name__
-            prompts, labels = sample_balanced_dataset(ds, max_samples=max_samples, random_state=random_state)
-            feats, labs, proms = _get_or_extract_features(
-                prompts, labels, mt, ds_name, model_name,
-                saving_dir, n_last_layers, force_extract=force_extract)
-            cached_features[ds_name] = (feats, labs, proms)
-
-        # Phase 2: 单独跑每个数据集（同数据集 7:3）
-        print(f"\n{'#'*60}")
-        print(f"  Phase 2: 同数据集测试")
-        print(f"{'#'*60}")
-        for DS in ALL_DATASETS:
-            ds = DS()
-            run_hidden_state_detection(
-                dataset=ds, mt=mt, model_name=model_name,
-                saving_dir=saving_dir, n_last_layers=n_last_layers,
-                max_samples=max_samples, test_size=test_size,
-                random_state=random_state, if_visualize=if_visualize,
-                force_extract=force_extract)
-
-        # Phase 3: 全部交叉验证对
-        print(f"\n{'#'*60}")
-        print(f"  Phase 3: 交叉验证（全部组合）")
-        print(f"{'#'*60}")
-        for TrainDS in ALL_DATASETS:
-            for TestDS in ALL_DATASETS:
-                if TrainDS == TestDS:
-                    continue
-                train_ds = TrainDS()
-                test_ds = TestDS()
-                run_hidden_state_detection(
-                    dataset=train_ds, mt=mt, model_name=model_name,
-                    saving_dir=saving_dir, n_last_layers=n_last_layers,
-                    max_samples=max_samples, test_size=test_size,
-                    random_state=random_state, if_visualize=if_visualize,
-                    test_dataset=test_ds, force_extract=force_extract)
-
-        sys.exit(0)
-
-    # --- 单次运行模式 ---
-    run_hidden_state_detection(
-        dataset=dataset,
-        mt=mt,
-        model_name=model_name,
-        saving_dir=saving_dir,
-        n_last_layers=n_last_layers,
-        max_samples=max_samples,
-        test_size=test_size,
-        if_visualize=if_visualize,
-        test_dataset=test_dataset,
-        random_state=random_state,
-        force_extract=force_extract,
-    )
+    parameters = _prepare_model_parameters(parameters, args)
+    _run_with_parameters(parameters, args)

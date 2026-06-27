@@ -111,79 +111,125 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ### 第二步：跑实验
 
-**只需改 `--model_name`，其余自动完成。** 每个模型的数据集相同（AutoDAN / GCG / PAP），不需要修改。
+**使用 `--model_name` 指定任意模型。** 可以是 Hugging Face / ModelScope 兼容模型目录，也可以是在线模型 ID。
 
 ```bash
-# ===== 方式一：命令行指定模型（推荐，不需要改任何文件） =====
+# 先进入项目目录。不要在 ~ 下直接运行，否则会找不到 public_func/hidden_state_detector.py
+cd /root/autodl-tmp
 
-# Llama-2-7B
 python public_func/hidden_state_detector.py \
-    --model_name "meta-llama/Llama-2-7b-chat-hf" \
-    --run_all
-
-# Llama-2-13B
-python public_func/hidden_state_detector.py \
-    --model_name "meta-llama/Llama-2-13b-chat-hf" \
-    --run_all
-
-# Llama-3.1-8B
-python public_func/hidden_state_detector.py \
-    --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" \
-    --run_all
-
-# Mistral-7B
-python public_func/hidden_state_detector.py \
-    --model_name "mistralai/Mistral-7B-Instruct-v0.2" \
-    --run_all
-
-# Qwen2.5-1.5B（小模型，快速验证）
-python public_func/hidden_state_detector.py \
-    --model_name "Qwen/Qwen2.5-1.5B-Instruct" \
-    --run_all
-
-
-# ===== 方式二：修改 parameters.json 后直接跑（不改命令行） =====
-# 编辑 public_func/parameters.json，把 model_name 改成目标模型，然后：
-python public_func/hidden_state_detector.py --run_all
+    --model_name "Qwen/Qwen2.5-7B-Instruct" \
+    --saving_dir "outputs_hiddenstate/qwen2.5-7b" \
+    --run_all \
+    --force_extract
 ```
+
+如果服务器不能访问 Hugging Face，不能直接用 `"Qwen/Qwen2.5-7B-Instruct"` 这种在线模型 ID。需要先把模型放到服务器本地，然后传本地目录：
+
+```bash
+cd /root/autodl-tmp
+
+python public_func/hidden_state_detector.py \
+    --model_name "/root/autodl-tmp/models/Qwen2.5-7B-Instruct" \
+    --saving_dir "outputs_hiddenstate/qwen2.5-7b" \
+    --run_all \
+    --force_extract \
+    --local_files_only
+```
+
+本地模型目录应包含 `config.json`、tokenizer 文件和权重文件。AutoDL 容器如果没有外网，必须使用这种本地路径方式，或者提前把 Hugging Face cache 准备好。
+
+也可以在 `public_func/parameters.json` 中写入 `model_name` / `saving_dir`，再直接运行 `python public_func/hidden_state_detector.py --run_all`。
 
 `--run_all` 自动完成：
 - 三个数据集各自 7:3 测试（3 次）
 - 全部 6 对交叉验证
+- LR / MLP / IForest 三个分类器
 - 所有 PCA + t-SNE 可视化
 - hidden-state 特征缓存（二次运行秒进）
+- `results_lasttoken_v2.csv/md` 汇总
+
+> 注意：`hidden_state_detector.py --run_all` 只跑正常主实验，不会自动跑层数消融。
+> 层数消融需要再运行 `layer_ablation_hidden_state.py`。
+
+### 第三步：跑层数消融（可选但推荐）
+
+主实验会生成 `last5` cache；层数消融会复用这个 cache 切片得到 `last1-last5`，只有 `last10` 在没有 cache 时需要重新提取 hidden states。
+
+推荐顺序：
+
+```bash
+# 1. 正常主实验：生成 last5 cache、同数据集/跨数据集结果、图表和汇总
+python public_func/hidden_state_detector.py \
+    --model_name "Qwen/Qwen2.5-7B-Instruct" \
+    --saving_dir "outputs_hiddenstate/qwen2.5-7b" \
+    --run_all \
+    --force_extract
+
+# 2. 层数消融：复用主实验 cache，额外补 last10
+python public_func/layer_ablation_hidden_state.py \
+    --model_name "Qwen/Qwen2.5-7B-Instruct" \
+    --output_dir "outputs_hiddenstate/qwen2.5-7b/ablations/AutoDAN_layers_lasttoken_v2" \
+    --main_cache_dir "outputs_hiddenstate/qwen2.5-7b/cache" \
+    --layers 1 2 3 4 5 10 \
+    --device cuda:0
+```
+
+如果使用本地路径模型：
+
+```bash
+python public_func/hidden_state_detector.py \
+    --model_name "/root/autodl-tmp/models/Qwen2.5-7B-Instruct" \
+    --saving_dir "outputs_hiddenstate/my-local-model" \
+    --run_all \
+    --force_extract \
+    --local_files_only
+
+python public_func/layer_ablation_hidden_state.py \
+    --model_name "/root/autodl-tmp/models/Qwen2.5-7B-Instruct" \
+    --output_dir "outputs_hiddenstate/my-local-model/ablations/AutoDAN_layers_lasttoken_v2" \
+    --main_cache_dir "outputs_hiddenstate/my-local-model/cache" \
+    --layers 1 2 3 4 5 10 \
+    --device cuda:0
+```
+
+消融输出：
+
+- `ablations/AutoDAN_layers_lasttoken_v2/cache/`
+- `ablations/AutoDAN_layers_lasttoken_v2/models/`
+- `ablations/AutoDAN_layers_lasttoken_v2/results_layer_ablation.csv`
+- `ablations/AutoDAN_layers_lasttoken_v2/results_layer_ablation.md`
 
 ---
 
-### 第三步：查看结果
+### 第四步：查看结果
 
 **每个模型自动输出到独立目录，不会互相覆盖。**
 
 ```
 outputs_hiddenstate/
-├── meta-llama_Llama-2-7b-chat-hf/      # 模型1
+├── qwen2.5-7b/
 │   ├── cache/
-│   │   ├── AutoDAN_..._samples614.npz   # hidden-state 特征缓存
+│   │   ├── AutoDAN_..._last5_lasttoken_v2_samples614.npz
 │   │   ├── GCG_..._samples1070.npz
 │   │   └── PAP_..._samples500.npz
 │   ├── figs/
 │   │   ├── hidden_state_AutoDAN_...pdf  # 同数据集 PCA/t-SNE
 │   │   ├── cross_AutoDAN_to_GCG_...pdf  # 跨数据集 PCA/t-SNE
 │   │   └── ...（共 12 张图）
-│   ├── logistic_hidden_state_AutoDAN.joblib
-│   └── mlp_hidden_state_AutoDAN.joblib
+│   ├── logistic_hidden_state_AutoDAN_lasttoken_v2.joblib
+│   ├── mlp_hidden_state_AutoDAN_lasttoken_v2.joblib
+│   ├── iforest_hidden_state_AutoDAN_lasttoken_v2.joblib
+│   ├── results_lasttoken_v2.csv
+│   ├── results_lasttoken_v2.md
+│   └── ablations/
+│       └── AutoDAN_layers_lasttoken_v2/
 │
-├── meta-llama_Llama-2-13b-chat-hf/     # 模型2
-│   └── ...
-│
-├── meta-llama_Meta-Llama-3.1-8B-Instruct/  # 模型3
-│   └── ...
-│
-└── mistralai_Mistral-7B-Instruct-v0.2/     # 模型4
+└── other-model/
     └── ...
 ```
 
-`saving_dir` 自动拼接规则：`outputs_hiddenstate/{model_name 的 / 替换为 _}/`
+直接使用 `--model_name` 时，如果不传 `--saving_dir`，脚本会按模型名自动生成输出目录；建议正式实验显式指定 `--saving_dir`，更容易管理。
 
 所以换模型 = 换输出目录，不会互相污染。跑完一个新模型，对应目录下就是它的全部结果。
 
@@ -193,8 +239,9 @@ outputs_hiddenstate/
 
 | 想做什么 | 命令 |
 |----------|------|
-| 换模型 | `--model_name "meta-llama/Llama-2-13b-chat-hf"` |
-| 跑全部实验 | `--run_all` |
+| 任意模型 | `--model_name "/path/to/model" --saving_dir "outputs_hiddenstate/my-model"` |
+| 跑正常主实验 | `hidden_state_detector.py --run_all` |
+| 跑层数消融 | `layer_ablation_hidden_state.py --layers 1 2 3 4 5 10` |
 | 只跑一个数据集 | `--dataset "AutoDAN()"`（去掉 `--run_all`） |
 | 跨数据集测试 | `--dataset "AutoDAN()" --test_dataset "GCG()"` |
 | 限制样本数 | `--max_samples 100`（各取 50 adv + 50 non_adv） |
