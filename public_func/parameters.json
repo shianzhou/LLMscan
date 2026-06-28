@@ -1,10 +1,8 @@
 {
-      "model_path": "",
-      "model_name": "meta-llama/Llama-2-7b-chat-hf",
       "dataset": "AutoDAN()",
       "test_dataset": "GCG()",
       "n_last_layers": 5,
       "random_state": 42,
       "if_visualize": true,
-      "saving_dir": "outputs_hiddenstate/"
+      "run_all": true
 }
